@@ -154,3 +154,71 @@ def test_arm_and_target_id_overlap_rejected(client):
     }
     r = client.post("/api/v1/assignment/adjudicate", json=payload)
     assert r.status_code == 422
+
+
+def test_large_coordinate_offset_intersecting_arms_excluded(client):
+    # Shifted by N = 1e17 the two only ways to reach six pairs are
+    # a0->t0 and a1->t1, but those closed segments strictly intersect
+    # (true gap 0).  A float pre-conversion of the integer coordinates
+    # hides the collision (ULP ~ 16 at this offset); the adjudicator must
+    # still cap the plan at 5 and report below_minimum.
+    n = 10**17
+    arms = [
+        {"id": "a0", "x": n + 559, "y": n - 119, "max_extension": 816},
+        {"id": "a1", "x": n + 615, "y": n - 143, "max_extension": 1685},
+    ] + [
+        {"id": f"a{i}", "x": i * 1000, "y": 0, "max_extension": 20}
+        for i in range(2, 6)
+    ]
+    targets = [
+        {"id": "t0", "x": n + 778, "y": n + 667, "priority": 1},
+        {"id": "t1", "x": n - 923, "y": n + 545, "priority": 1},
+    ] + [
+        {"id": f"t{i}", "x": i * 1000, "y": 20, "priority": 1}
+        for i in range(2, 6)
+    ]
+    payload = {
+        "arms": arms,
+        "targets": targets,
+        "clearance": 10,
+        "minimum_assignments": 6,
+    }
+    r = client.post("/api/v1/assignment/adjudicate", json=payload)
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    assert data["status"] == "below_minimum"
+    assert data["maximum_attainable"] == 5
+    assert data["objectives"]["assigned_count"] == 5
+
+    pairs = {(a["arm_id"], a["target_id"]) for a in data["assignments"]}
+    assert ("a0", "t0") not in pairs or ("a1", "t1") not in pairs
+
+    # Every returned plan must honour the 10-unit clearance; the
+    # intersecting pair must not be reported as a 16-unit gap.
+    evidence = data["clearance_evidence"]
+    assert evidence["satisfied"] is True
+    assert evidence["minimum_pair_distance"] is None or (
+        evidence["minimum_pair_distance"] + 1e-9 >= 10
+    )
+    for rec in evidence["tightest_pairs"]:
+        assert rec["satisfies_clearance"] is True
+        assert rec["distance"] + 1e-9 >= 10
+
+    # Independently re-verify the clearance of every selected segment
+    # using exact geometry.
+    from app.geometry import segment_distance
+
+    by_arm = {a["id"]: a for a in arms}
+    by_target = {t["id"]: t for t in targets}
+    segs = []
+    for a in data["assignments"]:
+        base, tgt = by_arm[a["arm_id"]], by_target[a["target_id"]]
+        segs.append(
+            ((base["x"], base["y"]), (tgt["x"], tgt["y"]))
+        )
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            d, _, _ = segment_distance(segs[i], segs[j])
+            assert d + 1e-9 >= 10
+

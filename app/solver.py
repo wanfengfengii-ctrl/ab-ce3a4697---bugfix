@@ -64,8 +64,11 @@ def solve(
         reach.append(tuple(edges))
 
     def segment(i: int, j: int):
+        # Keep the integer coordinates exact: geometry.py computes with
+        # rationals because a float pre-conversion loses precision when the
+        # absolute coordinates are large (ULP ~ 16 at 1e17).
         a, t = arms[i], targets[j]
-        return ((float(a["x"]), float(a["y"])), (float(t["x"]), float(t["y"])))
+        return ((a["x"], a["y"]), (t["x"], t["y"]))
 
     dist_cache: Dict[Tuple[int, int, int, int], Tuple[float, tuple, tuple]] = {}
 
