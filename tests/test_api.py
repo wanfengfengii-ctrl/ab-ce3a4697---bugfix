@@ -142,6 +142,84 @@ def test_invalid_inputs_rejected(client, mutation):
     assert r.status_code == 422
 
 
+def test_large_coordinate_translation_detects_crossing(client):
+    # Regression: endpoints near 10**17 exceed the float64 exact-integer
+    # range (ULP 16), so float segment distance reported a phantom 16-unit
+    # gap for two strictly crossing closed segments and both conflicting
+    # pairs were admitted into a "satisfied" 6-assignment solution.
+    n = 10**17
+    payload = {
+        "arms": [
+            {"id": "a0", "x": n + 559, "y": n - 119, "max_extension": 816},
+            {"id": "a1", "x": n + 615, "y": n - 143, "max_extension": 1685},
+            {"id": "a2", "x": 2000, "y": 0, "max_extension": 20},
+            {"id": "a3", "x": 3000, "y": 0, "max_extension": 20},
+            {"id": "a4", "x": 4000, "y": 0, "max_extension": 20},
+            {"id": "a5", "x": 5000, "y": 0, "max_extension": 20},
+        ],
+        "targets": [
+            {"id": "t0", "x": n + 778, "y": n + 667, "priority": 1},
+            {"id": "t1", "x": n - 923, "y": n + 545, "priority": 1},
+            {"id": "t2", "x": 2000, "y": 20, "priority": 1},
+            {"id": "t3", "x": 3000, "y": 20, "priority": 1},
+            {"id": "t4", "x": 4000, "y": 20, "priority": 1},
+            {"id": "t5", "x": 5000, "y": 20, "priority": 1},
+        ],
+        "clearance": 10,
+        "minimum_assignments": 6,
+    }
+    r = client.post("/api/v1/assignment/adjudicate", json=payload)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "below_minimum"
+    assert data["maximum_attainable"] == 5
+    assert data["objectives"]["assigned_count"] == 5
+    chosen = {(a["arm_id"], a["target_id"]) for a in data["assignments"]}
+    # The two crossing pairs can never both appear.
+    assert not ({("a0", "t0"), ("a1", "t1")} <= chosen)
+    evidence = data["clearance_evidence"]
+    assert evidence["satisfied"] is True
+    # The adjudicator's verdict must agree with its own distance evidence.
+    for rec in evidence["tightest_pairs"]:
+        assert rec["satisfies_clearance"] == (rec["distance"] + 1e-9 >= 10)
+
+
+def test_distance_exactly_equal_to_clearance_admissible_large(client):
+    # Business regression: distance == clearance stays legal even after a
+    # large coordinate translation (exact, not float-rounded, comparison).
+    n = 10**17
+    arms = [
+        {"id": "a0", "x": n, "y": n, "max_extension": 20},
+        {"id": "a1", "x": n + 10, "y": n, "max_extension": 20},
+    ]
+    targets = [
+        {"id": "t0", "x": n, "y": n + 10, "priority": 1},
+        {"id": "t1", "x": n + 10, "y": n + 10, "priority": 1},
+    ]
+    for i in range(2, 6):
+        arms.append(
+            {"id": f"a{i}", "x": n + 1000 * i, "y": n, "max_extension": 20}
+        )
+        targets.append(
+            {"id": f"t{i}", "x": n + 1000 * i, "y": n + 10, "priority": 1}
+        )
+    payload = {
+        "arms": arms,
+        "targets": targets,
+        "clearance": 10,
+        "minimum_assignments": 6,
+    }
+    r = client.post("/api/v1/assignment/adjudicate", json=payload)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    # a0/a1 runs are parallel vertical segments exactly 10 apart.
+    assert data["status"] == "satisfied"
+    assert data["maximum_attainable"] == 6
+    assert data["clearance_evidence"]["satisfied"] is True
+    tightest = data["clearance_evidence"]["tightest_pairs"][0]
+    assert abs(tightest["distance"] - 10.0) < 1e-9
+
+
 def test_arm_and_target_id_overlap_rejected(client):
     payload = {
         "arms": six_arms(),

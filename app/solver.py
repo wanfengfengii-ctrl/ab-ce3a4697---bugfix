@@ -27,10 +27,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Dict, List, Tuple
 
-from .geometry import segment_distance
+from .geometry import segment_distance, segments_clearance_ok
 from .matching import hungarian_min, max_cardinality
-
-CLEARANCE_EPS = 1e-9
 
 
 def _stable_key(vec: Tuple[int, ...], n_targets: int) -> Tuple[int, ...]:
@@ -65,7 +63,9 @@ def solve(
 
     def segment(i: int, j: int):
         a, t = arms[i], targets[j]
-        return ((float(a["x"]), float(a["y"])), (float(t["x"]), float(t["y"])))
+        # Integer coordinates: clearance is decided with exact arithmetic so
+        # that coordinates beyond the float64 exact-integer range stay sound.
+        return ((a["x"], a["y"]), (t["x"], t["y"]))
 
     dist_cache: Dict[Tuple[int, int, int, int], Tuple[float, tuple, tuple]] = {}
 
@@ -78,9 +78,10 @@ def solve(
         return hit
 
     def compatible(i: int, j: int, placed: List[Tuple[int, int]]) -> bool:
+        p1, p2 = segment(i, j)
         for i2, j2 in placed:
-            d, _, _ = pair_distance(i, j, i2, j2)
-            if d < clearance - CLEARANCE_EPS:
+            q1, q2 = segment(i2, j2)
+            if not segments_clearance_ok(p1, p2, q1, q2, clearance):
                 return False
         return True
 

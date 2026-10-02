@@ -21,8 +21,9 @@ from .models import (
     PairEvidence,
     UnassignedObject,
 )
+from .geometry import segments_clearance_ok
 from .matching import max_cardinality
-from .solver import CLEARANCE_EPS, solve
+from .solver import solve
 
 READY = False
 
@@ -87,7 +88,7 @@ def _build_response(req: AssignmentRequest) -> AssignmentResponse:
     target_dicts = [t.model_dump() for t in req.targets]
     for d, a in zip(arm_dicts, req.arms):
         d["reach"] = a.max_extension
-    result = solve(arm_dicts, target_dicts, float(req.clearance))
+    result = solve(arm_dicts, target_dicts, req.clearance)
     vec: Tuple[int, ...] = result["vec"]
     count: int = result["count"]
     arms = req.arms
@@ -114,6 +115,12 @@ def _build_response(req: AssignmentRequest) -> AssignmentResponse:
         for k in range(idx + 1, len(placed)):
             i2, j2 = placed[k]
             d, p, q = pair_distance(i, j, i2, j2)
+            # Exact integer predicate: the float distance is evidence only.
+            ok = segments_clearance_ok(
+                (arms[i].x, arms[i].y), (targets[j].x, targets[j].y),
+                (arms[i2].x, arms[i2].y), (targets[j2].x, targets[j2].y),
+                req.clearance,
+            )
             rec = PairEvidence(
                 arm_a=arms[i].id,
                 target_a=targets[j].id,
@@ -122,14 +129,12 @@ def _build_response(req: AssignmentRequest) -> AssignmentResponse:
                 distance=d,
                 closest_point_on_a=[p[0], p[1]],
                 closest_point_on_b=[q[0], q[1]],
-                satisfies_clearance=d + CLEARANCE_EPS >= req.clearance,
+                satisfies_clearance=ok,
             )
             pair_records.append((d, rec))
     pair_records.sort(key=lambda r: r[0])
     min_pair: Optional[float] = pair_records[0][0] if pair_records else None
-    clearance_ok = all(
-        d + CLEARANCE_EPS >= req.clearance for d, _ in pair_records
-    )
+    clearance_ok = all(rec.satisfies_clearance for _, rec in pair_records)
 
     assignments: List[Assignment] = []
     arm_lengths: List[ArmLength] = []

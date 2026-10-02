@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from fractions import Fraction
 
 import httpx
 
@@ -59,6 +60,44 @@ def seg_dist(p1, p2, q1, q2) -> float:
     px, py = p1[0] + s * ux, p1[1] + s * uy
     qx, qy = q1[0] + t * vx, q1[1] + t * vy
     return math.hypot(px - qx, py - qy)
+
+
+def seg_dist_exact(p1, p2, q1, q2):
+    """Exact squared distance (Fraction) between integer-coordinate
+    closed segments -- independent of the service's geometry code."""
+
+    def cross(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def on(a, b, p):
+        return (
+            cross(a, b, p) == 0
+            and min(a[0], b[0]) <= p[0] <= max(a[0], b[0])
+            and min(a[1], b[1]) <= p[1] <= max(a[1], b[1])
+        )
+
+    o = [cross(p1, p2, q1), cross(p1, p2, q2),
+         cross(q1, q2, p1), cross(q1, q2, p2)]
+    if ((o[0] > 0 > o[1] or o[0] < 0 < o[1])
+            and (o[2] > 0 > o[3] or o[2] < 0 < o[3])):
+        return Fraction(0)
+    if on(p1, p2, q1) or on(p1, p2, q2) or on(q1, q2, p1) or on(q1, q2, p2):
+        return Fraction(0)
+
+    def point_seg(p, a, b):
+        ux, uy = b[0] - a[0], b[1] - a[1]
+        l2 = ux * ux + uy * uy
+        if l2 == 0:
+            return Fraction((p[0] - a[0]) ** 2 + (p[1] - a[1]) ** 2)
+        t = Fraction((p[0] - a[0]) * ux + (p[1] - a[1]) * uy, l2)
+        t = max(Fraction(0), min(Fraction(1), t))
+        qx, qy = a[0] + t * ux, a[1] + t * uy
+        return (Fraction(p[0]) - qx) ** 2 + (Fraction(p[1]) - qy) ** 2
+
+    return min(
+        point_seg(p1, q1, q2), point_seg(p2, q1, q2),
+        point_seg(q1, p1, p2), point_seg(q2, p1, p2),
+    )
 
 
 def main() -> None:
@@ -188,6 +227,93 @@ def main() -> None:
     print(
         f"below-minimum case ok: max {data['maximum_attainable']} < 2, reason given"
     )
+
+    # ---- 2b. large coordinate translation must not hide crossings --------
+    # Endpoints near 10**17 exceed 2**53 (float64 ULP = 16); the a0->t0 and
+    # a1->t1 closed segments strictly intersect.  Six assignments require
+    # both, so the true maximum is five.
+    n = 10**17
+    translated = {
+        "arms": [
+            {"id": "c0", "x": n + 559, "y": n - 119, "max_extension": 816},
+            {"id": "c1", "x": n + 615, "y": n - 143, "max_extension": 1685},
+            {"id": "c2", "x": 2000, "y": 0, "max_extension": 20},
+            {"id": "c3", "x": 3000, "y": 0, "max_extension": 20},
+            {"id": "c4", "x": 4000, "y": 0, "max_extension": 20},
+            {"id": "c5", "x": 5000, "y": 0, "max_extension": 20},
+        ],
+        "targets": [
+            {"id": "u0", "x": n + 778, "y": n + 667, "priority": 1},
+            {"id": "u1", "x": n - 923, "y": n + 545, "priority": 1},
+            {"id": "u2", "x": 2000, "y": 20, "priority": 1},
+            {"id": "u3", "x": 3000, "y": 20, "priority": 1},
+            {"id": "u4", "x": 4000, "y": 20, "priority": 1},
+            {"id": "u5", "x": 5000, "y": 20, "priority": 1},
+        ],
+        "clearance": 10,
+        "minimum_assignments": 6,
+    }
+    r = client.post(PATH, json=translated)
+    if r.status_code != 200:
+        fail(f"translated case rejected: {r.status_code} {r.text}")
+    data = r.json()
+    if data["status"] != "below_minimum":
+        fail(f"translated crossing must be below_minimum, got {data['status']}")
+    if data["maximum_attainable"] != 5:
+        fail(f"translated crossing caps attainable pairs at 5, got "
+             f"{data['maximum_attainable']}")
+    chosen = {(a["arm_id"], a["target_id"]) for a in data["assignments"]}
+    if {("c0", "u0"), ("c1", "u1")} <= chosen:
+        fail("both intersecting pairs were admitted into the solution")
+
+    arms = {a["id"]: a for a in translated["arms"]}
+    tgts = {t["id"]: t for t in translated["targets"]}
+    placed = list(chosen)
+    for i in range(len(placed)):
+        for j in range(i + 1, len(placed)):
+            ba, ta = placed[i]
+            bb, tb = placed[j]
+            a1, a2 = arms[ba], arms[bb]
+            g1, g2 = tgts[ta], tgts[tb]
+            d2 = seg_dist_exact(
+                (a1["x"], a1["y"]), (g1["x"], g1["y"]),
+                (a2["x"], a2["y"]), (g2["x"], g2["y"]),
+            )
+            if d2 < 100:
+                fail(f"placed pair {placed[i]} vs {placed[j]} violates "
+                     f"clearance 10: d^2 = {float(d2):.6f}")
+    if not data["clearance_evidence"]["satisfied"]:
+        fail("clearance evidence must agree with the collision-free solution")
+
+    # Distance exactly equal to the clearance remains legal after translation.
+    equal = {
+        "arms": [
+            {"id": "e0", "x": n, "y": n, "max_extension": 20},
+            {"id": "e1", "x": n + 10, "y": n, "max_extension": 20},
+            *[
+                {"id": f"e{i}", "x": n + 1000 * i, "y": n, "max_extension": 20}
+                for i in range(2, 6)
+            ],
+        ],
+        "targets": [
+            {"id": "v0", "x": n, "y": n + 10, "priority": 1},
+            {"id": "v1", "x": n + 10, "y": n + 10, "priority": 1},
+            *[
+                {"id": f"v{i}", "x": n + 1000 * i, "y": n + 10, "priority": 1}
+                for i in range(2, 6)
+            ],
+        ],
+        "clearance": 10,
+        "minimum_assignments": 6,
+    }
+    data = client.post(PATH, json=equal).json()
+    if data["status"] != "satisfied" or data["maximum_attainable"] != 6:
+        fail(f"distance == clearance must be admissible: {data['status']} "
+             f"max={data['maximum_attainable']}")
+    if data["clearance_evidence"]["minimum_pair_distance"] + 1e-9 < 10:
+        fail("tightest reported pair drifted below the exact 10-unit clearance")
+    print("translated-coordinate cases ok: crossing rejected (max 5), "
+          "exact-equality gap admitted")
 
     # ---- 3. invalid inputs never reach the solver -----------------------
     base_good = {
